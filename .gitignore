@@ -15,4 +15,5 @@ target
 dependency-reduced-pom.xml
 parquet-scrooge/.cache
 .idea/*
+*/.idea/*
 target/

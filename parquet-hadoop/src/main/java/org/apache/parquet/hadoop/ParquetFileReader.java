@@ -47,6 +47,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
+import org.apache.commons.io.filefilter.MagicNumberFileFilter;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileStatus;
@@ -288,7 +289,7 @@ public class ParquetFileReader implements Closeable {
    * Read the footers of all the files under that path (recursively)
    * using summary files if possible
    * @param configuration the configuration to access the FS
-   * @param fileStatus the root dir
+   * @param pathStatus the root dir
    * @return all the footers
    * @throws IOException
    */
@@ -412,23 +413,51 @@ public class ParquetFileReader implements Closeable {
       if (l < MAGIC.length + FOOTER_LENGTH_SIZE + MAGIC.length) { // MAGIC + data + footer + footerIndex + MAGIC
         throw new RuntimeException(file.getPath() + " is not a Parquet file (too small)");
       }
-      long footerLengthIndex = l - FOOTER_LENGTH_SIZE - MAGIC.length;
-      if (Log.DEBUG) LOG.debug("reading footer index at " + footerLengthIndex);
 
-      f.seek(footerLengthIndex);
-      int footerLength = readIntLittleEndian(f);
+      int PRE_READ_SIZE = 1000000; // 1MB, must be larger than FOOTER_LENGTH_SIZE + MAGIC.length
+      if (PRE_READ_SIZE < FOOTER_LENGTH_SIZE + MAGIC.length) {
+        throw new RuntimeException("Pre-read size too small: " + PRE_READ_SIZE);
+      }
+      long preReadIndex = l - PRE_READ_SIZE;
+      if (preReadIndex < 0) {
+        preReadIndex = 0;
+      }
+      int preReadLength = (int)(l - preReadIndex);
+      if (Log.INFO) LOG.info("-DEBUG pre-read length: " + preReadLength + ", pre-read index: " + preReadIndex);
+
+      f.seek(preReadIndex);
+      byte[] buffer = new byte[preReadLength];
+      f.readFully(buffer);
+      ByteArrayInputStream bufferStream = new ByteArrayInputStream(buffer);
+
+      bufferStream.skip(preReadLength - FOOTER_LENGTH_SIZE - MAGIC.length);
+      int footerLength = readIntLittleEndian(bufferStream);
+      if (Log.INFO) LOG.info("-DEBUG footer length: " + footerLength);
       byte[] magic = new byte[MAGIC.length];
-      f.readFully(magic);
+      bufferStream.read(magic);
       if (!Arrays.equals(MAGIC, magic)) {
         throw new RuntimeException(file.getPath() + " is not a Parquet file. expected magic number at tail " + Arrays.toString(MAGIC) + " but found " + Arrays.toString(magic));
       }
-      long footerIndex = footerLengthIndex - footerLength;
-      if (Log.DEBUG) LOG.debug("read footer length: " + footerLength + ", footer index: " + footerIndex);
-      if (footerIndex < MAGIC.length || footerIndex >= footerLengthIndex) {
-        throw new RuntimeException("corrupted file: the footer index is not within the file");
+
+      if (footerLength <= preReadLength - FOOTER_LENGTH_SIZE - MAGIC.length) { // read from buffer stream
+        long footerIndex = preReadLength - FOOTER_LENGTH_SIZE - MAGIC.length - footerLength;
+        if (Log.INFO) LOG.info("-DEBUG read footer length: " + footerLength + ", footer index: " + footerIndex + " from pre-read buffer");
+        if (footerLength <= 0) {
+          throw new RuntimeException("corrupted file: the footer index is not within the file");
+        }
+        bufferStream.reset();
+        bufferStream.skip(footerIndex);
+        return converter.readParquetMetadata(bufferStream, filter);
+      } else { // read from original file stream
+        long footerLengthIndex = l - FOOTER_LENGTH_SIZE - MAGIC.length;
+        long footerIndex = footerLengthIndex - footerLength;
+        if (Log.INFO) LOG.info("-DEBUG read footer length: " + footerLength + ", footer index: " + footerIndex + " from original file");
+        if (footerIndex < MAGIC.length || footerIndex >= footerLengthIndex) {
+          throw new RuntimeException("corrupted file: the footer index is not within the file");
+        }
+        f.seek(footerIndex);
+        return converter.readParquetMetadata(f, filter);
       }
-      f.seek(footerIndex);
-      return converter.readParquetMetadata(f, filter);
     } finally {
       f.close();
     }

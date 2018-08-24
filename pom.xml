@@ -57,6 +57,14 @@
     </developer>
   </developers>
 
+  <repositories>
+    <repository>
+      <id>twitter</id>
+      <name>Twitter repo</name>
+      <url>https://maven.twttr.com</url>
+    </repository>
+  </repositories>
+
   <!-- this is needed for maven-thrift-plugin, would like to remove this.
    see: https://issues.apache.org/jira/browse/THRIFT-1536  -->
   <pluginRepositories>
